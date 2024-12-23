@@ -320,6 +320,11 @@ class CtaEngine(BaseEngine):
                 continue
 
             vt_orderids.append(vt_orderid)
+            # 新增，主动呼叫 on_order，而不是等待 trader 的回调，新order的datatime为None，需要特别注意
+            orderid = vt_orderid.split('.', 1)[-1]
+            tmp_order = req.create_order_data(orderid, contract.gateway_name)
+            self.call_strategy_func(strategy, strategy.on_order, tmp_order)
+            #
 
             self.main_engine.update_order_request(req, vt_orderid, contract.gateway_name)
 
@@ -676,6 +681,9 @@ class CtaEngine(BaseEngine):
 
         # Call on_init function of strategy
         self.call_strategy_func(strategy, strategy.on_init)
+        if not strategy.inited:
+            self.write_log(_("{}初始化失败，请检查错误信息").format(strategy_name))
+            return
 
         # Restore strategy data(variables)
         data: Optional[dict] = self.strategy_data.get(strategy_name, None)
@@ -695,7 +703,7 @@ class CtaEngine(BaseEngine):
             self.write_log(_("行情订阅失败，找不到合约{}").format(strategy.vt_symbol), strategy)
 
         # Put event to update init completed status.
-        strategy.inited = True
+        # strategy.inited = True
         self.put_strategy_event(strategy)
         self.write_log(_("{}初始化完成").format(strategy_name))
 

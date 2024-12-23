@@ -2,10 +2,11 @@
 Defines constants and objects used in CtaStrategy App.
 """
 
+import random
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, List, Optional, Literal
 
 from vnpy.trader.constant import Direction, Offset, Interval
 from .locale import _
@@ -56,3 +57,58 @@ INTERVAL_DELTA_MAP: Dict[Interval, timedelta] = {
     Interval.HOUR: timedelta(hours=1),
     Interval.DAILY: timedelta(days=1),
 }
+
+
+# 用于指标部分
+
+INDICATOR_TYPE = Literal['line', 'mark']
+INDICATOR_LINE_STYLE = Literal['solid', 'dotted', 'dashed', 'large_dashed', 'sparse_dotted']
+INDICATOR_MARKER_POSITION = Literal['above', 'below', 'inside']
+INDICATOR_MARKER_SHAPE = Literal['arrow_up', 'arrow_down', 'circle', 'square']
+
+
+@dataclass
+class IndicatorMarkItem:
+    text: str
+    color: Optional[str] = None
+    position: Optional[INDICATOR_MARKER_POSITION] = None
+    shape: Optional[INDICATOR_MARKER_SHAPE] = None
+
+
+@dataclass()
+class IndicatorConfig:
+    type: INDICATOR_TYPE
+    name: str
+    display_name: Optional[str] = None
+    chart: str = ''
+    color: Optional[str] = None
+    visable: bool = True
+
+    # 仅用于 LINE
+    line_style: INDICATOR_LINE_STYLE = 'solid'
+    line_thick: int = 1
+
+    # 用于 MARK
+    mark_position: INDICATOR_MARKER_POSITION = 'below'
+    mark_shape: INDICATOR_MARKER_SHAPE = 'arrow_up'
+
+    def __post_init__(self) -> None:
+        """"""
+        if self.display_name is None:
+            self.display_name = self.name
+        if self.color is None:
+            self.color = _get_random_color()
+
+
+@dataclass
+class IndicatorStore:
+    config: Dict[str, List[IndicatorConfig]] = field(default_factory=dict)
+    data: Dict[str, list[float|IndicatorMarkItem]] = field(default_factory=dict)
+
+
+def _get_random_color():
+    red = random.randint(30, 255)
+    green = random.randint(30, 255)
+    blue = random.randint(30, 255)
+    color = "#{:02x}{:02x}{:02x}".format(red, green, blue)
+    return color

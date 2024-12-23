@@ -56,7 +56,7 @@ class CtaTemplate(ABC):
         """
         class_parameters: dict = {}
         for name in cls.parameters:
-            class_parameters[name] = getattr(cls, name)
+            class_parameters[name] = getattr(cls, name, None)
         return class_parameters
 
     def get_parameters(self) -> dict:
@@ -65,7 +65,7 @@ class CtaTemplate(ABC):
         """
         strategy_parameters: dict = {}
         for name in self.parameters:
-            strategy_parameters[name] = getattr(self, name)
+            strategy_parameters[name] = getattr(self, name, None)
         return strategy_parameters
 
     def get_variables(self) -> dict:
@@ -74,7 +74,7 @@ class CtaTemplate(ABC):
         """
         strategy_variables: dict = {}
         for name in self.variables:
-            strategy_variables[name] = getattr(self, name)
+            strategy_variables[name] = getattr(self, name, None)
         return strategy_variables
 
     def get_data(self) -> dict:

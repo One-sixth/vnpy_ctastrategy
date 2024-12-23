@@ -4,7 +4,9 @@ from typing import Callable, List, Dict, Optional, Type
 from functools import lru_cache, partial
 import traceback
 
+import random
 import numpy as np
+from copy import deepcopy
 from pandas import DataFrame, Series
 from pandas.core.window import ExponentialMovingWindow
 import plotly.graph_objects as go
@@ -33,7 +35,10 @@ from .base import (
     STOPORDER_PREFIX,
     StopOrder,
     StopOrderStatus,
-    INTERVAL_DELTA_MAP
+    INTERVAL_DELTA_MAP,
+    IndicatorConfig,
+    IndicatorMarkItem,
+    IndicatorStore,
 )
 from .template import CtaTemplate
 from .locale import _
@@ -61,6 +66,8 @@ class BacktestingEngine:
         self.annual_days: int = 240
         self.half_life: int = 120
         self.mode: BacktestingMode = BacktestingMode.BAR
+        self.ban_short: bool = False
+        self.trade_on_close_price: bool = False
 
         self.strategy_class: Type[CtaTemplate] = None
         self.strategy: CtaTemplate = None
@@ -83,6 +90,9 @@ class BacktestingEngine:
 
         self.trade_count: int = 0
         self.trades: Dict[str, TradeData] = {}
+
+        # 新增，支持自定义指标
+        self.indicators = None
 
         self.logs: list = []
 
@@ -126,7 +136,9 @@ class BacktestingEngine:
         mode: BacktestingMode = BacktestingMode.BAR,
         risk_free: float = 0,
         annual_days: int = 240,
-        half_life: int = 120
+        half_life: int = 120,
+        ban_short: bool = False,
+        trade_on_close_price: bool = False,
     ) -> None:
         """"""
         self.mode = mode
@@ -151,6 +163,24 @@ class BacktestingEngine:
         self.risk_free = risk_free
         self.annual_days = annual_days
         self.half_life = half_life
+        self.ban_short = ban_short
+        self.trade_on_close_price = trade_on_close_price
+
+    def init_indicators(self):
+        indicators = getattr(self.strategy, 'indicators', None)
+        if indicators is None:
+            self.indicators = None
+            return
+
+        assert isinstance(indicators, list)
+        self.indicators = IndicatorStore()
+
+        # 检查和初始化指标格式
+        for cfg in indicators:
+            assert isinstance(cfg, IndicatorConfig)
+            assert isinstance(cfg.name, str) and len(cfg.name) > 0
+            self.indicators.config[cfg.name] = deepcopy(cfg)
+            self.indicators.data[cfg.name] = []
 
     def add_strategy(self, strategy_class: Type[CtaTemplate], setting: dict) -> None:
         """"""
@@ -158,6 +188,9 @@ class BacktestingEngine:
         self.strategy = strategy_class(
             self, strategy_class.__name__, self.vt_symbol, setting
         )
+
+        # 检查是否需要记录指标
+        self.init_indicators()
 
     def load_data(self) -> None:
         """"""
@@ -235,12 +268,13 @@ class BacktestingEngine:
         for ix, i in enumerate(range(0, total_size, batch_size)):
             batch_data: list = self.history_data[i: i + batch_size]
             for data in batch_data:
-                try:
-                    func(data)
-                except Exception:
-                    self.output(_("触发异常，回测终止"))
-                    self.output(traceback.format_exc())
-                    return
+                func(data)
+                # try:
+                #     func(data)
+                # except Exception:
+                #     self.output(_("触发异常，回测终止"))
+                #     self.output(traceback.format_exc())
+                #     return
 
             progress = min(ix / 10, 1)
             progress_bar: str = "=" * (ix + 1)
@@ -397,7 +431,8 @@ class BacktestingEngine:
                 ewm_window: ExponentialMovingWindow = df["return"].ewm(halflife=self.half_life)
                 ewm_mean: Series = ewm_window.mean() * 100
                 ewm_std: Series = ewm_window.std() * 100
-                ewm_sharpe: float = ((ewm_mean - daily_risk_free) / ewm_std)[-1] * np.sqrt(self.annual_days)
+                # ewm_sharpe: float = ((ewm_mean - daily_risk_free) / ewm_std)[-1] * np.sqrt(self.annual_days)
+                ewm_sharpe: float = ((ewm_mean - daily_risk_free) / ewm_std).iloc[-1] * np.sqrt(self.annual_days)
             else:
                 sharpe_ratio: float = 0
                 ewm_sharpe: float = 0
@@ -593,6 +628,25 @@ class BacktestingEngine:
         else:
             self.daily_results[d] = DailyResult(d, price)
 
+    def record_indicators(self):
+        # 记录自定义指标
+        if self.indicators is not None:
+            for name, cfg in self.indicators.config.items():
+                data: list = self.indicators.data[name]
+                if cfg.type == 'line':
+                    # 只允许指标为数值
+                    data.append(float(getattr(self.strategy, name, np.nan)))
+                elif cfg.type == 'mark':
+                    m = getattr(self.strategy, name, None)
+                    if m is None:
+                        data.append(None)
+                    elif isinstance(m, str):
+                        m = IndicatorMarkItem(m, cfg.color, cfg.mark_position, cfg.mark_shape)
+                        data.append(m)
+                    else:
+                        assert isinstance(m, IndicatorMarkItem)
+                        data.append(m)
+
     def new_bar(self, bar: BarData) -> None:
         """"""
         self.bar = bar
@@ -601,8 +655,13 @@ class BacktestingEngine:
         self.cross_limit_order()
         self.cross_stop_order()
         self.strategy.on_bar(bar)
+        if self.trade_on_close_price:
+            self.cross_limit_order(True)
+            self.cross_stop_order(True)
 
         self.update_daily_close(bar.close_price)
+        # 记录指标
+        self.record_indicators()
 
     def new_tick(self, tick: TickData) -> None:
         """"""
@@ -614,16 +673,21 @@ class BacktestingEngine:
         self.strategy.on_tick(tick)
 
         self.update_daily_close(tick.last_price)
+        # 记录指标，tick目前不画图，则不记录
+        # self.record_indicators()
 
-    def cross_limit_order(self) -> None:
+    def cross_limit_order(self, trade_on_close_price=False) -> None:
         """
         Cross limit order with last bar/tick data.
         """
         if self.mode == BacktestingMode.BAR:
-            long_cross_price = self.bar.low_price
-            short_cross_price = self.bar.high_price
-            long_best_price = self.bar.open_price
-            short_best_price = self.bar.open_price
+            if trade_on_close_price:
+                long_cross_price = short_cross_price = long_best_price = short_best_price = self.bar.close_price
+            else:
+                long_cross_price = self.bar.low_price
+                short_cross_price = self.bar.high_price
+                long_best_price = self.bar.open_price
+                short_best_price = self.bar.open_price
         else:
             long_cross_price = self.tick.ask_price_1
             short_cross_price = self.tick.bid_price_1
@@ -631,6 +695,9 @@ class BacktestingEngine:
             short_best_price = short_cross_price
 
         for order in list(self.active_limit_orders.values()):
+            if trade_on_close_price and order.datetime != self.datetime:
+                continue
+
             # Push order update with status "not traded" (pending).
             if order.status == Status.SUBMITTING:
                 order.status = Status.NOTTRADED
@@ -688,15 +755,18 @@ class BacktestingEngine:
 
             self.trades[trade.vt_tradeid] = trade
 
-    def cross_stop_order(self) -> None:
+    def cross_stop_order(self, trade_on_close_price=False) -> None:
         """
         Cross stop order with last bar/tick data.
         """
         if self.mode == BacktestingMode.BAR:
-            long_cross_price = self.bar.high_price
-            short_cross_price = self.bar.low_price
-            long_best_price = self.bar.open_price
-            short_best_price = self.bar.open_price
+            if trade_on_close_price:
+                long_cross_price = short_cross_price = long_best_price = short_best_price = self.bar.close_price
+            else:
+                long_cross_price = self.bar.high_price
+                short_cross_price = self.bar.low_price
+                long_best_price = self.bar.open_price
+                short_best_price = self.bar.open_price
         else:
             long_cross_price = self.tick.last_price
             short_cross_price = self.tick.last_price
@@ -704,6 +774,9 @@ class BacktestingEngine:
             short_best_price = short_cross_price
 
         for stop_order in list(self.active_stop_orders.values()):
+            if trade_on_close_price and stop_order.datetime != self.datetime:
+                continue
+
             # Check whether stop order can be triggered.
             long_cross: bool = (
                 stop_order.direction == Direction.LONG
@@ -863,6 +936,9 @@ class BacktestingEngine:
         self.active_stop_orders[stop_order.stop_orderid] = stop_order
         self.stop_orders[stop_order.stop_orderid] = stop_order
 
+        # 呼叫 on_order
+        self.strategy.on_stop_order(stop_order)
+
         return stop_order.stop_orderid
 
     def send_limit_order(
@@ -888,8 +964,22 @@ class BacktestingEngine:
             datetime=self.datetime
         )
 
-        self.active_limit_orders[order.vt_orderid] = order
+        if self.ban_short and order.direction == Direction.SHORT:
+            # 如果禁止卖空
+            pos = self.strategy.pos
+            for other_order in self.active_limit_orders.values():
+                if other_order.vt_symbol == order.vt_symbol:
+                    if other_order.direction == Direction.SHORT:
+                        pos -= other_order.volume
+            if pos - order.volume < 0:
+                order.status = Status.REJECTED
+
+        if order.status == Status.SUBMITTING:
+            self.active_limit_orders[order.vt_orderid] = order
         self.limit_orders[order.vt_orderid] = order
+
+        # 呼叫 on_order
+        self.strategy.on_order(order)
 
         return order.vt_orderid
 
@@ -999,6 +1089,12 @@ class BacktestingEngine:
         """
         return list(self.daily_results.values())
 
+    def get_indicators(self) -> list:
+        """
+        Return all indicators data.
+        """
+        return self.indicators
+
 
 class DailyResult:
     """"""
@@ -1074,7 +1170,7 @@ class DailyResult:
         self.net_pnl = self.total_pnl - self.commission - self.slippage
 
 
-@lru_cache(maxsize=999)
+# @lru_cache(maxsize=999)
 def load_bar_data(
     symbol: str,
     exchange: Exchange,
@@ -1090,7 +1186,7 @@ def load_bar_data(
     )
 
 
-@lru_cache(maxsize=999)
+# @lru_cache(maxsize=999)
 def load_tick_data(
     symbol: str,
     exchange: Exchange,
@@ -1118,6 +1214,8 @@ def evaluate(
     capital: int,
     end: datetime,
     mode: BacktestingMode,
+    ban_short: bool,
+    trade_on_close_price: bool,
     setting: dict
 ) -> tuple:
     """
@@ -1135,7 +1233,9 @@ def evaluate(
         pricetick=pricetick,
         capital=capital,
         end=end,
-        mode=mode
+        mode=mode,
+        ban_short=ban_short,
+        trade_on_close_price=trade_on_close_price,
     )
 
     engine.add_strategy(strategy_class, setting)
@@ -1165,7 +1265,9 @@ def wrap_evaluate(engine: BacktestingEngine, target_name: str) -> callable:
         engine.pricetick,
         engine.capital,
         engine.end,
-        engine.mode
+        engine.mode,
+        engine.ban_short,
+        engine.trade_on_close_price,
     )
     return func
 
