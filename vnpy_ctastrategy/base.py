@@ -46,6 +46,12 @@ class StopOrder:
     vt_orderids: list = field(default_factory=list)
     status: StopOrderStatus = StopOrderStatus.WAITING
 
+    def is_active(self) -> bool:
+        """
+        Check if the order is active.
+        """
+        return self.status in [StopOrderStatus.WAITING]
+
 
 EVENT_CTA_LOG = "eCtaLog"
 EVENT_CTA_STRATEGY = "eCtaStrategy"

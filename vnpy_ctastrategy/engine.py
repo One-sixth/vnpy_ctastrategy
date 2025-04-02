@@ -686,12 +686,10 @@ class CtaEngine(BaseEngine):
             return
 
         # Restore strategy data(variables)
+        # 恢复策略的数据，改写成可以被策略重载的方法
         data: Optional[dict] = self.strategy_data.get(strategy_name, None)
         if data:
-            for name in strategy.variables:
-                value = data.get(name, None)
-                if value is not None:
-                    setattr(strategy, name, value)
+            strategy.update_variables(data)
 
         # Subscribe market data
         contract: Optional[ContractData] = self.main_engine.get_contract(strategy.vt_symbol)

@@ -17,7 +17,8 @@ from vnpy.trader.constant import (
     Offset,
     Exchange,
     Interval,
-    Status
+    Status,
+    Dividend,
 )
 from vnpy.trader.database import get_database, BaseDatabase
 from vnpy.trader.object import OrderData, TradeData, BarData, TickData
@@ -126,6 +127,7 @@ class BacktestingEngine:
         self,
         vt_symbol: str,
         interval: Interval,
+        dividend: Dividend,
         start: datetime,
         rate: float,
         slippage: float,
@@ -144,6 +146,7 @@ class BacktestingEngine:
         self.mode = mode
         self.vt_symbol = vt_symbol
         self.interval = Interval(interval)
+        self.dividend = Dividend(dividend)
         self.rate = rate
         self.slippage = slippage
         self.size = size
@@ -227,14 +230,16 @@ class BacktestingEngine:
                     self.exchange,
                     self.interval,
                     start,
-                    end
+                    end,
+                    dividend=self.dividend
                 )
             else:
                 data: List[TickData] = load_tick_data(
                     self.symbol,
                     self.exchange,
                     start,
-                    end
+                    end,
+                    dividend=self.dividend
                 )
 
             self.history_data.extend(data)
@@ -673,8 +678,8 @@ class BacktestingEngine:
         self.strategy.on_tick(tick)
 
         self.update_daily_close(tick.last_price)
-        # 记录指标，tick目前不画图，则不记录
-        # self.record_indicators()
+        # 记录指标
+        self.record_indicators()
 
     def cross_limit_order(self, trade_on_close_price=False) -> None:
         """
@@ -1176,13 +1181,14 @@ def load_bar_data(
     exchange: Exchange,
     interval: Interval,
     start: datetime,
-    end: datetime
+    end: datetime,
+    dividend: Dividend=Dividend.FRONT_RATIO,
 ) -> List[BarData]:
     """"""
     database: BaseDatabase = get_database()
 
     return database.load_bar_data(
-        symbol, exchange, interval, start, end
+        symbol, exchange, interval, start, end, dividend=dividend
     )
 
 
@@ -1191,13 +1197,14 @@ def load_tick_data(
     symbol: str,
     exchange: Exchange,
     start: datetime,
-    end: datetime
+    end: datetime,
+    dividend: Dividend=Dividend.FRONT_RATIO,
 ) -> List[TickData]:
     """"""
     database: BaseDatabase = get_database()
 
     return database.load_tick_data(
-        symbol, exchange, start, end
+        symbol, exchange, start, end, dividend=dividend
     )
 
 
@@ -1206,6 +1213,7 @@ def evaluate(
     strategy_class: CtaTemplate,
     vt_symbol: str,
     interval: Interval,
+    dividend: Dividend,
     start: datetime,
     rate: float,
     slippage: float,
@@ -1226,6 +1234,7 @@ def evaluate(
     engine.set_parameters(
         vt_symbol=vt_symbol,
         interval=interval,
+        dividend=dividend,
         start=start,
         rate=rate,
         slippage=slippage,
@@ -1258,6 +1267,7 @@ def wrap_evaluate(engine: BacktestingEngine, target_name: str) -> callable:
         engine.strategy_class,
         engine.vt_symbol,
         engine.interval,
+        engine.dividend,
         engine.start,
         engine.rate,
         engine.slippage,

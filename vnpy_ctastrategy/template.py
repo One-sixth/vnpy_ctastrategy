@@ -77,6 +77,15 @@ class CtaTemplate(ABC):
             strategy_variables[name] = getattr(self, name, None)
         return strategy_variables
 
+    def update_variables(self, data: dict):
+        """
+        Get strategy variables dict.
+        """
+        for name in self.variables:
+            value = data.get(name, None)
+            if value is not None:
+                setattr(self, name, value)
+
     def get_data(self) -> dict:
         """
         Get strategy data.
