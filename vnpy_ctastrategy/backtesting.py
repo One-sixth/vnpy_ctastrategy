@@ -799,6 +799,14 @@ class BacktestingEngine:
             # Create order data.
             self.limit_order_count += 1
 
+            # 是否会委托失败
+            order_fail = False
+            if self.ban_short:
+                # 禁止买空时，要检查仓位是否足够，如果不够，虽然触发停止单，但委托会失败
+                if self.strategy.pos == 0 or stop_order.volume > self.strategy.pos:
+                    # 失败的委托
+                    order_fail = True
+
             order: OrderData = OrderData(
                 symbol=self.symbol,
                 exchange=self.exchange,
@@ -813,32 +821,39 @@ class BacktestingEngine:
                 datetime=self.datetime
             )
 
+            if order_fail:
+                # 委托失败了
+                order.traded = 0
+                order.status = Status.REJECTED
+
             self.limit_orders[order.vt_orderid] = order
 
-            # Create trade data.
-            if long_cross:
-                trade_price = max(stop_order.price, long_best_price)
-                pos_change = order.volume
-            else:
-                trade_price = min(stop_order.price, short_best_price)
-                pos_change = -order.volume
+            if not order_fail:
+                # 如果委托成功了
+                # Create trade data.
+                if long_cross:
+                    trade_price = max(stop_order.price, long_best_price)
+                    pos_change = order.volume
+                else:
+                    trade_price = min(stop_order.price, short_best_price)
+                    pos_change = -order.volume
 
-            self.trade_count += 1
+                self.trade_count += 1
 
-            trade: TradeData = TradeData(
-                symbol=order.symbol,
-                exchange=order.exchange,
-                orderid=order.orderid,
-                tradeid=str(self.trade_count),
-                direction=order.direction,
-                offset=order.offset,
-                price=trade_price,
-                volume=order.volume,
-                datetime=self.datetime,
-                gateway_name=self.gateway_name,
-            )
+                trade: TradeData = TradeData(
+                    symbol=order.symbol,
+                    exchange=order.exchange,
+                    orderid=order.orderid,
+                    tradeid=str(self.trade_count),
+                    direction=order.direction,
+                    offset=order.offset,
+                    price=trade_price,
+                    volume=order.volume,
+                    datetime=self.datetime,
+                    gateway_name=self.gateway_name,
+                )
 
-            self.trades[trade.vt_tradeid] = trade
+                self.trades[trade.vt_tradeid] = trade
 
             # Update stop order.
             stop_order.vt_orderids.append(order.vt_orderid)
@@ -851,8 +866,9 @@ class BacktestingEngine:
             self.strategy.on_stop_order(stop_order)
             self.strategy.on_order(order)
 
-            self.strategy.pos += pos_change
-            self.strategy.on_trade(trade)
+            if not order_fail:
+                self.strategy.pos += pos_change
+                self.strategy.on_trade(trade)
 
     def load_bar(
         self,
