@@ -658,11 +658,12 @@ class BacktestingEngine:
         self.datetime = bar.datetime
 
         self.cross_limit_order()
-        self.cross_stop_order()
+        # self.cross_stop_order()
+        self.cross_stop_order_2()
         self.strategy.on_bar(bar)
         if self.trade_on_close_price:
             self.cross_limit_order(True)
-            self.cross_stop_order(True)
+            # 在收盘部分判定时，不计算停止单
 
         self.update_daily_close(bar.close_price)
         # 记录指标
@@ -674,14 +675,15 @@ class BacktestingEngine:
         self.datetime = tick.datetime
 
         self.cross_limit_order()
-        self.cross_stop_order()
+        # self.cross_stop_order()
+        self.cross_stop_order_2()
         self.strategy.on_tick(tick)
 
         self.update_daily_close(tick.last_price)
         # 记录指标
         self.record_indicators()
 
-    def cross_limit_order(self, trade_on_close_price=False) -> None:
+    def cross_limit_order(self, trade_on_close_price=False, stop_order_mode=False) -> None:
         """
         Cross limit order with last bar/tick data.
         """
@@ -736,10 +738,10 @@ class BacktestingEngine:
             self.trade_count += 1
 
             if long_cross:
-                trade_price = min(order.price, long_best_price)
+                trade_price = min(order.price, long_best_price) if not stop_order_mode else order.price
                 pos_change = order.volume
             else:
-                trade_price = max(order.price, short_best_price)
+                trade_price = max(order.price, short_best_price) if not stop_order_mode else order.price
                 pos_change = -order.volume
 
             trade: TradeData = TradeData(
@@ -760,18 +762,17 @@ class BacktestingEngine:
 
             self.trades[trade.vt_tradeid] = trade
 
-    def cross_stop_order(self, trade_on_close_price=False) -> None:
+    def cross_stop_order(self) -> None:
         """
         Cross stop order with last bar/tick data.
         """
+        raise AssertionError('函数已禁用，目前已经不使用这个，请用 cross_stop_order_2')
+
         if self.mode == BacktestingMode.BAR:
-            if trade_on_close_price:
-                long_cross_price = short_cross_price = long_best_price = short_best_price = self.bar.close_price
-            else:
-                long_cross_price = self.bar.high_price
-                short_cross_price = self.bar.low_price
-                long_best_price = self.bar.open_price
-                short_best_price = self.bar.open_price
+            long_cross_price = self.bar.high_price
+            short_cross_price = self.bar.low_price
+            long_best_price = self.bar.open_price
+            short_best_price = self.bar.open_price
         else:
             long_cross_price = self.tick.last_price
             short_cross_price = self.tick.last_price
@@ -779,9 +780,6 @@ class BacktestingEngine:
             short_best_price = short_cross_price
 
         for stop_order in list(self.active_stop_orders.values()):
-            if trade_on_close_price and stop_order.datetime != self.datetime:
-                continue
-
             # Check whether stop order can be triggered.
             long_cross: bool = (
                 stop_order.direction == Direction.LONG
@@ -803,7 +801,13 @@ class BacktestingEngine:
             order_fail = False
             if self.ban_short:
                 # 禁止买空时，要检查仓位是否足够，如果不够，虽然触发停止单，但委托会失败
-                if self.strategy.pos == 0 or stop_order.volume > self.strategy.pos:
+                alive_pos = self.strategy.pos
+                # 排除挂单卖出中
+                for order in self.active_limit_orders:
+                    if order.direction == Direction.SHORT:
+                        alive_pos -= order.volume
+
+                if stop_order.volume > alive_pos:
                     # 失败的委托
                     order_fail = True
 
@@ -869,6 +873,63 @@ class BacktestingEngine:
             if not order_fail:
                 self.strategy.pos += pos_change
                 self.strategy.on_trade(trade)
+
+    def cross_stop_order_2(self) -> None:
+        """
+        Cross stop order with last bar/tick data.
+        修改，改为发送委托的方式，而不在这里处理交易
+        """
+        if self.mode == BacktestingMode.BAR:
+            long_cross_price = self.bar.high_price
+            short_cross_price = self.bar.low_price
+            long_best_price = self.bar.open_price
+            short_best_price = self.bar.open_price
+        else:
+            long_cross_price = self.tick.last_price
+            short_cross_price = self.tick.last_price
+            long_best_price = long_cross_price
+            short_best_price = short_cross_price
+
+        for stop_order in list(self.active_stop_orders.values()):
+            # Check whether stop order can be triggered.
+            long_cross: bool = (
+                stop_order.direction == Direction.LONG
+                and stop_order.price <= long_cross_price
+            )
+
+            short_cross: bool = (
+                stop_order.direction == Direction.SHORT
+                and stop_order.price >= short_cross_price
+            )
+
+            if not long_cross and not short_cross:
+                continue
+
+            # Create order data.
+            self.limit_order_count += 1
+
+            # 发送停止委托单
+            # 可能出现跳空现象，需要对停止单的价格做检查，确保触发的当根K线就成交
+            if short_cross:
+                price = min(stop_order.price, short_best_price)
+            elif long_cross:
+                price = max(stop_order.price, long_best_price)
+            else:
+                price = stop_order.price
+            vt_orderid = self.send_limit_order(stop_order.direction, stop_order.offset, price, stop_order.volume)
+
+            # 触发停止单事件
+            stop_order.vt_orderids.append(vt_orderid)
+            stop_order.status = StopOrderStatus.TRIGGERED
+
+            if stop_order.stop_orderid in self.active_stop_orders:
+                self.active_stop_orders.pop(stop_order.stop_orderid)
+
+            # Push update to strategy.
+            self.strategy.on_stop_order(stop_order)
+
+        # 检查停止单成交
+        self.cross_limit_order(trade_on_close_price=False, stop_order_mode=True)
 
     def load_bar(
         self,
@@ -987,12 +1048,15 @@ class BacktestingEngine:
 
         if self.ban_short and order.direction == Direction.SHORT:
             # 如果禁止卖空
-            pos = self.strategy.pos
-            for other_order in self.active_limit_orders.values():
-                if other_order.vt_symbol == order.vt_symbol:
-                    if other_order.direction == Direction.SHORT:
-                        pos -= other_order.volume
-            if pos - order.volume < 0:
+            alive_pos = self.strategy.pos
+            for exist_order in self.active_limit_orders.values():
+                if (
+                    exist_order.vt_symbol == order.vt_symbol
+                    and exist_order.direction == Direction.SHORT
+                ):
+                    alive_pos -= exist_order.volume
+            if order.volume > alive_pos:
+                # 可用数量不足，拒绝委托
                 order.status = Status.REJECTED
 
         if order.status == Status.SUBMITTING:
